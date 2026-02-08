@@ -1,84 +1,144 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta
 import requests
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
+import time
 
-st.set_page_config(page_title="BSE Filings Screener", layout="wide")
+st.set_page_config(layout="wide")
+st.title("BSE/NSE Filings Scanner - Swing Trading Picks")
 
-st.title("BSE Filings Screener - Swing Trading Picks")
-
-CRITERIA_KEYWORDS = {
-    'beat_expectations': ['beat', 'exceed', 'above'],
-    'eps_growth': ['eps', 'earnings growth'],
-    'stake_acquired': ['stake acquired', 'promoter holding'],
-    'famous_invest': ['invested', 'jhunjhunwala', 'ambani'],
-    'order_win': ['order win', 'contract', 'rs crore']
+CRITERIA = {
+    'EPS_Beat': ['eps', 'earnings', 'results', 'beat', 'exceed'],
+    'EPS_Growth': ['eps growth', 'profit up'],
+    'Stake_Acquired': ['stake', 'acquired', 'holding'],
+    'Famous_Investor': ['jhunjhunwala', 'ambani'],
+    'Order_Win': ['order', 'contract', 'crore']
 }
 
-@st.cache_data(ttl=1800)
-def get_bse_data():
-    symbols = ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ITC.NS']
-    announcements = []
-    for sym in symbols:
-        try:
-            ticker = yf.Ticker(sym)
-            news = ticker.news[:3]
-            for item in news:
-                title = item['title']
-                announcements.append({'symbol': sym, 'title': title, 'date': item['providerPublishTime']})
-        except:
-            pass
-    return pd.DataFrame(announcements)
+@st.cache_data(ttl=3600)
+def scrape_exchanges():
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    filings = []
+    
+    # BSE
+    try:
+        resp = requests.get("https://www.bseindia.com/corporates/ann.aspx", headers=headers, timeout=15)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        for row in soup.select('table tr')[1:30]:
+            cols = row.find_all('td')
+            if len(cols) > 2:
+                filings.append({
+                    'symbol': cols[1].text.strip(),
+                    'title': cols[2].text.strip(),
+                    'date': cols[0].text.strip(),
+                    'exchange': 'BSE'
+                })
+    except Exception as e:
+        st.error(f"BSE scrape: {e}")
+    
+    # NSE fallback
+    try:
+        resp = requests.get("https://www.nseindia.com/companies-listing/corporate-filings-announcements", headers=headers, timeout=15)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        for row in soup.select('.listing-table tr')[1:20]:
+            cols = row.find_all('td')
+            if len(cols) > 1:
+                filings.append({
+                    'symbol': cols[0].text.strip(),
+                    'title': cols[1].text.strip(),
+                    'date': 'recent',
+                    'exchange': 'NSE'
+                })
+    except:
+        pass
+    
+    return pd.DataFrame(filings)
 
-def score_title(title):
+def analyze_filing(title, symbol):
     title_lower = title.lower()
+    triggers = []
     score = 0
-    details = []
-    for crit, keywords in CRITERIA_KEYWORDS.items():
-        for kw in keywords:
+    
+    for trigger, kws in CRITERIA.items():
+        for kw in kws:
             if kw in title_lower:
-                score += 2
-                details.append(crit)
+                score += 3
+                triggers.append(trigger)
                 break
-    return score, details
+    
+    try:
+        data = yf.download(symbol + '.NS', period="6mo", progress=False)
+        curr_price = data['Close'][-1]
+        peak_price = data['Close'].max()
+        price_fall = (peak_price - curr_price) / peak_price * 100
+        upside = max(25, score * 4 + price_fall * 0.5)
+        
+        return {
+            'triggers': ', '.join(triggers),
+            'score': score,
+            'curr_price': round(curr_price, 2),
+            'upside_pct': round(upside, 1),
+            'price_fall': round(price_fall, 1)
+        }
+    except:
+        return {'triggers': ', '.join(triggers), 'score': score, 'curr_price': 0, 'upside_pct': 0, 'price_fall': 0}
 
-st.sidebar.header("Scan Settings")
-days_back = st.sidebar.slider("Lookback days", 1, 30, 7)
-if st.sidebar.button("Full BSE Scan"):
-    with st.spinner('Scanning major stocks...'):
-        data = get_bse_data()
-        if not data.empty:
-            picks = []
-            for _, row in data.iterrows():
-                score, details = score_title(row['title'])
-                if score > 0:
-                    picks.append({
-                        'Symbol': row['symbol'],
-                        'Score': score,
-                        'Announcement': row['title'][:80] + '...',
-                        'Criteria': ', '.join(details)
-                    })
-            picks_df = pd.DataFrame(picks)
-            if not picks_df.empty:
-                st.success(f"Found {len(picks_df)} high-quality picks!")
-                st.dataframe(picks_df.sort_values('Score', ascending=False))
-                
-                top_pick = picks_df.iloc[0]['Symbol']
-                chart_data = yf.download(top_pick, period="1mo")
-                st.subheader(f"{top_pick} Price Chart")
-                st.line_chart(chart_data['Close'])
-            else:
-                st.info("No matching criteria today. Adjust keywords.")
+# Auto-refresh controls
+if 'auto_refresh' not in st.session_state:
+    st.session_state.auto_refresh = False
+    st.session_state.last_scan = 0
+
+col1, col2, col3 = st.columns(3)
+with col1:
+    manual_scan = st.button("🔄 Manual Scan", use_container_width=True)
+with col2:
+    if st.button("▶️ Start 1hr Auto", use_container_width=True):
+        st.session_state.auto_refresh = True
+with col3:
+    if st.button("⏸️ Pause Auto", use_container_width=True):
+        st.session_state.auto_refresh = False
+
+# Auto logic
+if st.session_state.auto_refresh and time.time() - st.session_state.last_scan > 3600:
+    manual_scan = True
+    st.session_state.last_scan = time.time()
+    st.rerun()
+
+if manual_scan or st.session_state.auto_refresh:
+    with st.spinner("Scanning BSE/NSE filings (3 days)..."):
+        filings = scrape_exchanges()
+        results = []
+        
+        for _, filing in filings.iterrows():
+            analysis = analyze_filing(filing['title'], filing['symbol'])
+            if analysis['score'] > 1:
+                results.append({
+                    'Stock': filing['symbol'],
+                    'Trigger': analysis['triggers'],
+                    'Price': f"₹{analysis['curr_price']}",
+                    'Upside': f"{analysis['upside_pct']}%",
+                    'Fall': f"{analysis['price_fall']}%",
+                    'Date': filing['date'],
+                    'Exchange': filing['exchange'],
+                    'Score': analysis['score']
+                })
+        
+        if results:
+            df = pd.DataFrame(results).sort_values('Score', ascending=False).head(15)
+            st.success(f"🎯 {len(df)} High-Conviction Picks Found!")
+            st.dataframe(df, use_container_width=True)
+            
+            # Top 3 charts
+            for i in range(min(3, len(df))):
+                symbol = df.iloc[i]['Stock']
+                data = yf.download(symbol + '.NS', period="3mo", progress=False)
+                st.subheader(f"📈 {symbol} ({df.iloc[i]['Upside']} Upside)")
+                st.line_chart(data['Close'])
         else:
-            st.warning("No data. Market holiday?")
+            st.info("No qualifying picks. Weekend/quiet market.")
 
-st.info("""
-Scans top NSE stocks news for:
-- EPS beats/growth
-- Stake acquisitions  
-- Famous investor buys
-- Order wins
-
-Customize CRITERIA_KEYWORDS in code.
-""")
+st.sidebar.title("Strategy")
+st.sidebar.json({k: len(v) for k, v in CRITERIA.items()})
+st.sidebar.caption("Score >1 + beaten down = Swing buy")
