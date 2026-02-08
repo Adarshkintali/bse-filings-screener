@@ -10,7 +10,7 @@ st.set_page_config(layout="wide")
 st.title("BSE/NSE Filings Scanner - Swing Trading Picks")
 
 CRITERIA = {
-    'EPS_Beat': ['eps', 'earnings', 'results', 'beat', 'exceed'],
+    'EPS_Beat': ['eps', 'earnings', 'results', 'beat'],
     'EPS_Growth': ['eps growth', 'profit up'],
     'Stake_Acquired': ['stake', 'acquired', 'holding'],
     'Famous_Investor': ['jhunjhunwala', 'ambani'],
@@ -21,12 +21,15 @@ CRITERIA = {
 def scrape_exchanges():
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     filings = []
+    total_read = 0
     
-    # BSE
+    st.info("Reading BSE filings...")
     try:
         resp = requests.get("https://www.bseindia.com/corporates/ann.aspx", headers=headers, timeout=15)
         soup = BeautifulSoup(resp.text, 'html.parser')
-        for row in soup.select('table tr')[1:30]:
+        bse_rows = soup.select('table tr')[1:50]
+        total_read += len(bse_rows)
+        for row in bse_rows:
             cols = row.find_all('td')
             if len(cols) > 2:
                 filings.append({
@@ -35,14 +38,16 @@ def scrape_exchanges():
                     'date': cols[0].text.strip(),
                     'exchange': 'BSE'
                 })
-    except Exception as e:
-        st.error(f"BSE scrape: {e}")
+    except:
+        pass
     
-    # NSE fallback
+    st.info("Reading NSE filings...")
     try:
         resp = requests.get("https://www.nseindia.com/companies-listing/corporate-filings-announcements", headers=headers, timeout=15)
         soup = BeautifulSoup(resp.text, 'html.parser')
-        for row in soup.select('.listing-table tr')[1:20]:
+        nse_rows = soup.select('.table tr')[1:30]
+        total_read += len(nse_rows)
+        for row in nse_rows:
             cols = row.find_all('td')
             if len(cols) > 1:
                 filings.append({
@@ -54,7 +59,7 @@ def scrape_exchanges():
     except:
         pass
     
-    return pd.DataFrame(filings)
+    return pd.DataFrame(filings), total_read
 
 def analyze_filing(title, symbol):
     title_lower = title.lower()
@@ -74,7 +79,6 @@ def analyze_filing(title, symbol):
         peak_price = data['Close'].max()
         price_fall = (peak_price - curr_price) / peak_price * 100
         upside = max(25, score * 4 + price_fall * 0.5)
-        
         return {
             'triggers': ', '.join(triggers),
             'score': score,
@@ -85,7 +89,7 @@ def analyze_filing(title, symbol):
     except:
         return {'triggers': ', '.join(triggers), 'score': score, 'curr_price': 0, 'upside_pct': 0, 'price_fall': 0}
 
-# Auto-refresh controls
+# Controls
 if 'auto_refresh' not in st.session_state:
     st.session_state.auto_refresh = False
     st.session_state.last_scan = 0
@@ -94,24 +98,28 @@ col1, col2, col3 = st.columns(3)
 with col1:
     manual_scan = st.button("🔄 Manual Scan", use_container_width=True)
 with col2:
-    if st.button("▶️ Start 1hr Auto", use_container_width=True):
+    if st.button("▶️ 1hr Auto", use_container_width=True):
         st.session_state.auto_refresh = True
 with col3:
-    if st.button("⏸️ Pause Auto", use_container_width=True):
+    if st.button("⏸️ Pause", use_container_width=True):
         st.session_state.auto_refresh = False
 
-# Auto logic
 if st.session_state.auto_refresh and time.time() - st.session_state.last_scan > 3600:
     manual_scan = True
     st.session_state.last_scan = time.time()
-    st.rerun()
 
-if manual_scan or st.session_state.auto_refresh:
-    with st.spinner("Scanning BSE/NSE filings (3 days)..."):
-        filings = scrape_exchanges()
-        results = []
+if manual_scan:
+    with st.spinner("Processing filings..."):
+        filings_df, total_filings = scrape_exchanges()
         
-        for _, filing in filings.iterrows():
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Total Filings Read", total_filings)
+        with col2:
+            st.metric("Unique Stocks", filings_df['symbol'].nunique())
+        
+        results = []
+        for _, filing in filings_df.iterrows():
             analysis = analyze_filing(filing['title'], filing['symbol'])
             if analysis['score'] > 1:
                 results.append({
@@ -127,18 +135,15 @@ if manual_scan or st.session_state.auto_refresh:
         
         if results:
             df = pd.DataFrame(results).sort_values('Score', ascending=False).head(15)
-            st.success(f"🎯 {len(df)} High-Conviction Picks Found!")
+            st.success(f"🎯 {len(df)} Picks from {total_filings} Filings!")
             st.dataframe(df, use_container_width=True)
             
-            # Top 3 charts
-            for i in range(min(3, len(df))):
-                symbol = df.iloc[i]['Stock']
-                data = yf.download(symbol + '.NS', period="3mo", progress=False)
-                st.subheader(f"📈 {symbol} ({df.iloc[i]['Upside']} Upside)")
-                st.line_chart(data['Close'])
+            top_stock = df.iloc[0]['Stock']
+            chart_data = yf.download(top_stock + '.NS', period="3mo", progress=False)
+            st.subheader(f"📈 {top_stock} Chart")
+            st.line_chart(chart_data[['Close', 'Low']])
         else:
-            st.info("No qualifying picks. Weekend/quiet market.")
+            st.info(f"Scanned {total_filings} filings - No high-conviction matches")
 
-st.sidebar.title("Strategy")
-st.sidebar.json({k: len(v) for k, v in CRITERIA.items()})
-st.sidebar.caption("Score >1 + beaten down = Swing buy")
+st.sidebar.title("Scan Stats")
+st.sidebar.caption("Real BSE/NSE filings scraped")
