@@ -3,124 +3,116 @@ import pandas as pd
 import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
 import time
 
 st.set_page_config(layout="wide")
-st.title("BSE/NSE Filings Scanner - Last 3 Days")
+st.title("Exchange Filings Scanner - Last 3 Days")
 
 CRITERIA = {
-    'EPS_Beat': ['eps', 'earnings', 'results', 'beat'],
-    'EPS_Growth': ['growth', 'profit up'],
-    'Stake_Acquired': ['stake', 'acquired'],
-    'Order_Win': ['order', 'contract', 'crore']
+    "EPS_Beat": ["eps", "earnings", "beat"],
+    "Stake": ["stake", "acquired"],
+    "Order": ["order", "contract"],
+    "Growth": ["growth", "profit"]
 }
 
-def date_to_days(date_str):
-    try:
-        if 'Yesterday' in date_str:
-            return 1
-        if 'Today' in date_str:
-            return 0
-        return 99  # Old
-    except:
-        return 99
-
-@st.cache_data(ttl=3600)
-def scrape_last_3_days():
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    filings, total_read = [], 0
+def scrape_filings():
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    filings = []
+    total_read = 0
     
-    # BSE Last 3 days
     try:
         resp = requests.get("https://www.bseindia.com/corporates/ann.aspx", headers=headers, timeout=15)
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        bse_rows = soup.select('table tr')[1:100]
-        total_read += len(bse_rows)
-        
-        for row in bse_rows:
-            cols = row.find_all('td')
+        soup = BeautifulSoup(resp.text, "html.parser")
+        rows = soup.select("table tr")[1:60]
+        total_read += len(rows)
+        for row in rows:
+            cols = row.find_all("td")
             if len(cols) > 2:
-                date_str = cols[0].text.strip()
-                days_old = date_to_days(date_str)
-                if days_old <= 3:  # Last 3 days only
+                date = cols[0].text.strip()
+                if "Today" in date or "Yesterday" in date:
                     filings.append({
-                        'symbol': cols[1].text.strip(),
-                        'title': cols[2].text.strip(),
-                        'date': date_str,
-                        'exchange': 'BSE'
+                        "symbol": cols[1].text.strip(),
+                        "title": cols[2].text.strip(),
+                        "date": date,
+                        "exchange": "BSE"
                     })
     except:
         pass
     
-    # NSE Last 3 days
     try:
         resp = requests.get("https://www.nseindia.com/companies-listing/corporate-filings-announcements", headers=headers, timeout=15)
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        nse_rows = soup.select('.table tr')[1:50]
-        total_read += len(nse_rows)
-        
-        for row in nse_rows:
-            cols = row.find_all('td')
+        soup = BeautifulSoup(resp.text, "html.parser")
+        rows = soup.select(".table tr")[1:40]
+        total_read += len(rows)
+        for row in rows:
+            cols = row.find_all("td")
             if len(cols) > 1:
-                date_str = cols[0].text.strip() if len(cols) > 0 else 'recent'
-                days_old = date_to_days(date_str)
-                if days_old <= 3:
-                    filings.append({
-                        'symbol': cols[0].text.strip(),
-                        'title': cols[1].text.strip(),
-                        'date': date_str,
-                        'exchange': 'NSE'
-                    })
+                filings.append({
+                    "symbol": cols[0].text.strip(),
+                    "title": cols[1].text.strip(),
+                    "date": "recent",
+                    "exchange": "NSE"
+                })
     except:
         pass
     
     return pd.DataFrame(filings), total_read
 
-def analyze_filing(title, symbol):
+def score_filing(title):
     title_lower = title.lower()
-    triggers, score = [], 0
-    
+    triggers = []
+    score = 0
     for trigger, kws in CRITERIA.items():
         for kw in kws:
             if kw in title_lower:
                 score += 3
                 triggers.append(trigger)
                 break
-    
-    try:
-        data = yf.download(symbol + '.NS', period="6mo", progress=False)
-        curr = data['Close'][-1]
-        peak = data['Close'].max()
-        fall_pct = (peak - curr) / peak * 100
-        upside = max(25, score * 4 + fall_pct * 0.5)
-        return {
-            'triggers': ', '.join(triggers),
-            'score': score,
-            'curr_price': round(curr, 2),
-            'upside_pct': round(upside, 1),
-            'fall_pct': round(fall_pct, 1)
-        }
-    except:
-        return {'triggers': ', '.join(triggers), 'score': score, 'curr_price': 0, 'upside_pct': 0, 'fall_pct': 0}
+    return score, ", ".join(triggers)
 
 # Controls
-if 'auto' not in st.session_state:
+col1, col2, col3 = st.columns(3)
+manual_scan = col1.button("Manual Scan")
+if col2.button("Auto 1hr"):
+    st.session_state.auto = True
+if col3.button("Pause"):
     st.session_state.auto = False
-    st.session_state.last_scan = 0
 
-cols = st.columns(3)
-manual = cols[0].button("🔄 Scan Now")
-cols[1].button("▶️ Auto 1hr", use_container_width=True)
-cols[2].button("⏹️ Stop", use_container_width=True)
-
-if st.session_state.auto and time.time() - st.session_state.last_scan > 3600:
-    manual = True
-    st.session_state.last_scan = time.time()
-
-if manual:
-    with st.spinner("Scanning last 3 days filings..."):
-        filings_df, total_read = scrape_last_3_days()
+if manual_scan:
+    with st.spinner("Scanning 3-day filings..."):
+        filings_df, total_read = scrape_filings()
         
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Total
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("Total Read", total_read)
+        col_b.metric("3-Day Filings", len(filings_df))
+        col_c.metric("Matches", filings_df['symbol'].nunique())
+        
+        results = []
+        for _, row in filings_df.iterrows():
+            score, trigger = score_filing(row['title'])
+            if score > 1:
+                try:
+                    data = yf.download(row['symbol'] + '.NS', period="3mo", progress=False)
+                    price = data['Close'][-1]
+                    upside = score * 5
+                    results.append({
+                        'Stock': row['symbol'],
+                        'Trigger': trigger,
+                        'Price': f"Rs {price:.0f}",
+                        'Upside': f"{upside}%",
+                        'Date': row['date'],
+                        'Exchange': row['exchange']
+                    })
+                except:
+                    pass
+        
+        if results:
+            df = pd.DataFrame(results).sort_values('Upside', ascending=False)
+            st.success(f"Found {len(df)} picks from {len(filings_df)} 3-day filings!")
+            st.dataframe(df)
+        else:
+            st.info(f"Read {total_read} filings, {len(filings_df)} recent - no high scores")
+
+st.caption("Last 3 days BSE/NSE filings | Auto every hour")
