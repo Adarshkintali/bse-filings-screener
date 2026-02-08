@@ -163,8 +163,11 @@ st.info("""
 
 Share specific strategy tweaks!
 """
-🔧 Notes:
-- Powered by BSE API for reliable announcements
-- Screens for EPS beats, stake buys, order wins etc.
-- Customize CRITERIA_KEYWORDS for your rules.
-"""
+st.info("""
+Notes:
+- Powered by BSE API for announcements
+- Screens EPS beats, stake buys, order wins
+- Customize CRITERIA_KEYWORDS dict
+- Beaten-down: >30% from peak
+Share your strategy rules!
+""")
