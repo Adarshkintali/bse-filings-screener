@@ -91,3 +91,25 @@ if st.sidebar.button("🚀 Screen Filings"):
 # Footer
 st.markdown("---")
 st.markdown("*Data: SEC EDGAR via sec-api.io [web:9], Yahoo Finance [web:10]. Built with Streamlit.*")
+import streamlit as st
+import pandas as pd
+import yfinance as yf
+import requests
+from bs4 import BeautifulSoup
+from sec_api import QueryApi, ExtractorApi
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
+import re
+
+# Page config
+st.set_page_config(
+    page_title="SEC Filings Screener Pro", 
+    page_icon="🔍",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+@st.cache_data(ttl=3600)
+def get_stock_data(tickers):
+    data
