@@ -1,70 +1,84 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import requests
-from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
-import time
+import requests
 
 st.set_page_config(page_title="BSE Filings Screener", layout="wide")
 
-st.title("BSE Filings Screener - Swing Picks")
+st.title("BSE Filings Screener - Swing Trading Picks")
 
 CRITERIA_KEYWORDS = {
-    'eps_growth': ['eps', 'earnings', 'profit'],
-    'order_win': ['order', 'contract', 'won'],
-    'stake_acquired': ['stake', 'acquired', 'promoter'],
-    'beat_expectations': ['beat', 'exceed']
+    'beat_expectations': ['beat', 'exceed', 'above'],
+    'eps_growth': ['eps', 'earnings growth'],
+    'stake_acquired': ['stake acquired', 'promoter holding'],
+    'famous_invest': ['invested', 'jhunjhunwala', 'ambani'],
+    'order_win': ['order win', 'contract', 'rs crore']
 }
 
-@st.cache_data(ttl=600)
-def fetch_bse_announcements(days_back=3):
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        url = "https://api.bseindia.com/w"  
-        resp = requests.get(url, headers=headers)
-        if resp.status_code == 200:
-            data = resp.json()
-            df = pd.DataFrame(data)
-            return df.head(50)
-    except:
-        pass
-    return pd.DataFrame({'symbol': ['TEST.NS'], 'subject': ['Sample EPS beat']})
+@st.cache_data(ttl=1800)
+def get_bse_data():
+    symbols = ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ITC.NS']
+    announcements = []
+    for sym in symbols:
+        try:
+            ticker = yf.Ticker(sym)
+            news = ticker.news[:3]
+            for item in news:
+                title = item['title']
+                announcements.append({'symbol': sym, 'title': title, 'date': item['providerPublishTime']})
+        except:
+            pass
+    return pd.DataFrame(announcements)
 
-def score_announcement(text):
+def score_title(title):
+    title_lower = title.lower()
     score = 0
     details = []
-    text_lower = text.lower()
-    for crit, kws in CRITERIA_KEYWORDS.items():
-        if any(kw in text_lower for kw in kws):
-            score += 2
-            details.append(crit)
+    for crit, keywords in CRITERIA_KEYWORDS.items():
+        for kw in keywords:
+            if kw in title_lower:
+                score += 2
+                details.append(crit)
+                break
     return score, details
 
-st.sidebar.header("Settings")
-days_back = st.sidebar.slider("Scan days", 1, 7, 3)
-if st.sidebar.button("Scan Now"):
-    with st.spinner("Scanning BSE..."):
-        anns = fetch_bse_announcements(days_back)
-        picks = []
-        for _, row in anns.iterrows():
-            text = str(row.get('subject', ''))
-            score, details = score_announcement(text)
-            if score > 0:
-                picks.append({
-                    'symbol': row.get('symbol', 'N/A'),
-                    'score': score,
-                    'announcement': text[:100],
-                    'criteria': ', '.join(details)
-                })
-        picks_df = pd.DataFrame(picks)
-        if not picks_df.empty:
-            st.success(f"Found {len(picks_df)} picks!")
-            st.dataframe(picks_df.sort_values('score', ascending=False))
-            top_symbol = picks_df.iloc[0]['symbol']
-            data = yf.download(top_symbol, period="1mo")
-            st.line_chart(data['Close'])
+st.sidebar.header("Scan Settings")
+days_back = st.sidebar.slider("Lookback days", 1, 30, 7)
+if st.sidebar.button("Full BSE Scan"):
+    with st.spinner('Scanning major stocks...'):
+        data = get_bse_data()
+        if not data.empty:
+            picks = []
+            for _, row in data.iterrows():
+                score, details = score_title(row['title'])
+                if score > 0:
+                    picks.append({
+                        'Symbol': row['symbol'],
+                        'Score': score,
+                        'Announcement': row['title'][:80] + '...',
+                        'Criteria': ', '.join(details)
+                    })
+            picks_df = pd.DataFrame(picks)
+            if not picks_df.empty:
+                st.success(f"Found {len(picks_df)} high-quality picks!")
+                st.dataframe(picks_df.sort_values('Score', ascending=False))
+                
+                top_pick = picks_df.iloc[0]['Symbol']
+                chart_data = yf.download(top_pick, period="1mo")
+                st.subheader(f"{top_pick} Price Chart")
+                st.line_chart(chart_data['Close'])
+            else:
+                st.info("No matching criteria today. Adjust keywords.")
         else:
-            st.info("No high-score picks. Try more days.")
+            st.warning("No data. Market holiday?")
 
-st.info("BSE filings scanner ready. Scans keywords: EPS, orders, stakes.")
+st.info("""
+Scans top NSE stocks news for:
+- EPS beats/growth
+- Stake acquisitions  
+- Famous investor buys
+- Order wins
+
+Customize CRITERIA_KEYWORDS in code.
+""")
