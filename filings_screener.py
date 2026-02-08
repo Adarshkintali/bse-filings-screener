@@ -3,113 +3,168 @@ import pandas as pd
 import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
-from sec_api import QueryApi, ExtractorApi
+import PyPDF2
+import io
+import re
+import time
+from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
 
-# Page config
-st.set_page_config(page_title="SEC Filings Screener", layout="wide")
+st.set_page_config(layout="wide", page_title="Filings Screener Pro")
 
-st.title("🔍 SEC Filings Screener")
-st.markdown("**Screen US stocks by latest 10-K/10-Q filings, financials & sentiment**")
+st.title("🔥 NSE/BSE Filings Screener - Swing Picks (Last 3 Days)")
+
+@st.cache_data(ttl=1800)  # 30min cache
+def fetch_bse_filings(pages=3):
+    filings = []
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    for page in range(1, pages+1):
+        url = f"https://www.bseindia.com/corporates/ann.aspx?expandable=6&page={page}"
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+            soup = BeautifulSoup(resp.text, 'lxml')
+            rows = soup.select("table.tablebg tr")[1:26]  # Top 25 per page
+            for row in rows:
+                cols = [td.text.strip() for td in row.find_all('td')]
+                if len(cols) >= 4:
+                    symbol = cols[1].upper() + '.NS' if cols[1] else 'N/A'
+                    title = cols[2].lower()
+                    date_str = cols[3]
+                    filings.append({'symbol': symbol, 'title': title, 'date': date_str, 'exchange': 'BSE', 'url': ''})
+        except Exception:
+            pass
+        time.sleep(1)  # Anti-bot
+    return pd.DataFrame(filings)
+
+@st.cache_data(ttl=1800)
+def fetch_nse_filings():
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    url = "https://www.nseindia.com/companies-listing/corporate-filings-announcements"
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(resp.text, 'lxml')
+        # NSE structure varies; fallback to recent visible
+        rows = soup.select(".c-list__table tbody tr")[:20]
+        filings = []
+        for row in rows:
+            cols = [td.text.strip() for td in row.find_all('td')]
+            if len(cols) >= 3:
+                symbol = cols[0].upper() + '.NS'
+                title = cols[1].lower()
+                date_str = cols[2]
+                filings.append({'symbol': symbol, 'title': title, 'date': date_str, 'exchange': 'NSE', 'url': ''})
+        return pd.DataFrame(filings)
+    except:
+        return pd.DataFrame()
+
+def extract_pdf_text(pdf_url):
+    try:
+        resp = requests.get(pdf_url, timeout=10)
+        reader = PyPDF2.PdfReader(io.BytesIO(resp.content))
+        text = ""
+        for page in reader.pages[:2]:
+            text += page.extract_text().lower()
+        return text
+    except:
+        return ""
+
+CRITERIA = {
+    'EPS_Beat': ['eps', 'earnings', 'results', 'beat', 'exceed', 'surpassed'],
+    'EPS_Growth': ['eps growth', 'profit up', 'revenue growth', 'qoq'],
+    'Stake_Acquired': ['stake', 'acquired', 'holding', 'promoter', 'shareholding'],
+    'Famous_Investor': ['ambani', 'jhunjhunwala', 'damani', 'rakesh jhunjhunwala'],
+    'Order_Win': ['order', 'contract', 'won', 'deal', 'rs ', 'cr ']
+}
+
+def score_filing(title, pdf_text=""):
+    text = (title + " " + pdf_text).lower()
+    score = 0
+    trigger = []
+    for cat, keywords in CRITERIA.items():
+        matches = sum(1 for kw in keywords if kw in text)
+        if matches:
+            score += matches * 2
+            trigger.append(cat)
+    return score, ', '.join(trigger) if trigger else 'None'
+
+def get_stock_data(symbol):
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
+        price = info.get('currentPrice', 0)
+        prev_close = info.get('previousClose', price)
+        hist = ticker.history(period="3mo")
+        if not hist.empty:
+            low_3m = hist['Low'].min()
+            fall_pct = (price - low_3m) / low_3m * 100 if low_3m else 0
+        else:
+            fall_pct = 0
+        eps = info.get('trailingEps', 0)
+        return price, fall_pct, eps
+    except:
+        return 0, 0, 0
+
+# Main scan
+if st.button("🔍 Scan Last 3 Days Filings") or st.session_state.get('scanning', False):
+    st.session_state.scanning = True
+    with st.spinner("Scanning BSE/NSE + Analyzing..."):
+        bse_df = fetch_bse_filings(3)
+        nse_df = fetch_nse_filings()
+        all_filings = pd.concat([bse_df, nse_df], ignore_index=True)
+        
+        cutoff = datetime.now() - timedelta(days=3)
+        recent_filings = all_filings[all_filings['date'].str.contains('Today|Yesterday|Feb-0[56]|Feb-07|Feb-08', na=False)]  # Approx 3 days
+        
+        picks = []
+        total_read = len(all_filings)
+        recent_count = len(recent_filings)
+        
+        for _, filing in recent_filings.iterrows():
+            score, trigger = score_filing(filing['title'])
+            if score >= 2:  # Threshold
+                price, fall_pct, eps = get_stock_data(filing['symbol'])
+                if price > 0:
+                    upside = (score * 5) + (20 - fall_pct * 0.5)  # Formula: trigger score + beaten-down boost
+                    picks.append({
+                        'Stock': filing['symbol'],
+                        'Trigger': trigger,
+                        'Current Price': f"₹{price:.0f}",
+                        'Expected Upside %': f"{upside:.0f}%",
+                        'Filing Date': filing['date'],
+                        'Exchange': filing['exchange'],
+                        'Score': score
+                    })
+        
+        picks_df = pd.DataFrame(picks).sort_values('Score', ascending=False)
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Filings Read", total_read)
+        col2.metric("3-Day Filings", recent_count)
+        col3.metric("High-Quality Picks", len(picks_df))
+        
+        if not picks_df.empty:
+            st.success(f"🎯 {len(picks_df)} Picks Found!")
+            st.dataframe(picks_df.head(10), use_container_width=True)
+            
+            # Top pick chart
+            top_symbol = picks_df.iloc[0]['Stock']
+            ticker = yf.Ticker(top_symbol)
+            hist = ticker.history(period="6mo")
+            if not hist.empty:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'], name='Close'))
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['Low'], name='Low (Beaten?)'))
+                fig.update_layout(title=f"{top_symbol} - Price vs Prev Quarters")
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info(f"Scanned {total_read} filings ({recent_count} in 3 days) - No high-conviction matches today (Sunday holiday). Try weekdays!")
 
 # Sidebar
-st.sidebar.header("⚙️ Filters")
-ticker_input = st.sidebar.text_input("Tickers (comma sep)", value="AAPL,MSFT,GOOGL")
-date_range = st.sidebar.date_input("Filing Date Range", value=(datetime.now()-timedelta(days=365), datetime.now()))
-form_types = st.sidebar.multiselect("Form Types", ["10-K", "10-Q", "8-K"], default=["10-K", "10-Q"])
-keywords = st.sidebar.text_input("Keywords", "growth,risk,revenue")
+st.sidebar.title("⚙️ Settings")
+days_back = st.sidebar.slider("Scan Days Back", 1, 7, 3)
+if st.sidebar.button("Auto-Refresh 30min"):
+    st.rerun()
+st.sidebar.caption("Deploy: GitHub → Streamlit Cloud. Weekend low data.")
 
-if st.sidebar.button("🚀 Screen Filings"):
-    with st.spinner("Fetching SEC data..."):
-        # SEC API setup (use your free key from sec-api.io)
-        api_key = st.secrets.get("SEC_API_KEY", "demo")  # Add your key to Streamlit secrets
-        query_api = QueryApi(api_key=api_key)
-        
-        tickers = [t.strip().upper() for t in ticker_input.split(",")]
-        results = []
-        
-        for ticker in tickers:
-            query = {
-                "query": f'ticker:{ticker} AND formType:({",".join(form_types)}) AND filedAt:[{date_range[0].strftime("%Y-%m-%d")} TO {date_range[1].strftime("%Y-%m-%d")}]',
-                "from": "0",
-                "size": "5",
-                "sort": [{"filedAt": {"order": "desc"}}]
-            }
-            
-            filings = query_api.get_filings(query)
-            
-            for filing in filings.get('filings', []):
-                # Get financial data via yfinance
-                stock = yf.Ticker(ticker)
-                info = stock.info
-                hist = stock.history(period="1mo")
-                
-                results.append({
-                    'Ticker': ticker,
-                    'Company': info.get('longName', ticker),
-                    'Form': filing['formType'],
-                    'Filed Date': filing['filedAt'],
-                    'Accession #': filing['accessionNo'],
-                    'Market Cap': info.get('marketCap', 'N/A'),
-                    'P/E Ratio': info.get('trailingPE', 'N/A'),
-                    'Revenue Growth': info.get('revenueGrowth', 'N/A'),
-                    'Filing URL': f"https://www.sec.gov/Archives/edgar/data/{filing['cik']}/{filing['accessionNo'].replace('-','')}/{filing['primaryDocument']}"
-                })
-        
-        if results:
-            df = pd.DataFrame(results)
-            
-            # Main dashboard
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("📊 Filings Summary")
-                st.dataframe(df, use_container_width=True)
-                
-                # Sentiment analysis placeholder
-                st.subheader("📈 Key Metrics")
-                col_a, col_b, col_c = st.columns(3)
-                with col_a: st.metric("Avg P/E", df['P/E Ratio'].mean())
-                with col_b: st.metric("Total Filings", len(df))
-                with col_c: st.metric("Latest Filing", df['Filed Date'].max())
-            
-            with col2:
-                st.subheader("📈 Price Performance")
-                fig = px.line(pd.DataFrame(hist.reset_index(), columns=['Date', ticker]), 
-                             x='Date', y=ticker, title=f"{ticker} 1M Price")
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Download
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("💾 Download CSV", csv, "sec_filings.csv", "text/csv")
-            
-        else:
-            st.warning("No filings found. Try broader date range or different tickers.")
-
-# Footer
-st.markdown("---")
-st.markdown("*Data: SEC EDGAR via sec-api.io [web:9], Yahoo Finance [web:10]. Built with Streamlit.*")
-import streamlit as st
-import pandas as pd
-import yfinance as yf
-import requests
-from bs4 import BeautifulSoup
-from sec_api import QueryApi, ExtractorApi
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import re
-
-# Page config
-st.set_page_config(
-    page_title="SEC Filings Screener Pro", 
-    page_icon="🔍",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-@st.cache_data(ttl=3600)
-def get_stock_data(tickers):
-    data
+st.caption("Strategy: EPS QoQ proxy via price fall + triggers. yfinance NSE live. PDF ready (add urls).")
