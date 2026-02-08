@@ -162,4 +162,9 @@ st.info("""
 - For live deploy: Use Streamlit Cloud + scheduler.
 
 Share specific strategy tweaks!
-""") [web:55][web:64]
+"""
+🔧 Notes:
+- Powered by BSE API for reliable announcements
+- Screens for EPS beats, stake buys, order wins etc.
+- Customize CRITERIA_KEYWORDS for your rules.
+"""
