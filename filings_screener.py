@@ -6,113 +6,102 @@ from bs4 import BeautifulSoup
 import time
 
 st.set_page_config(layout="wide")
-st.title("Exchange Filings Scanner - Last 3 Days")
+st.title("BSE/NSE 3-Day Filings Scanner")
 
 CRITERIA = {
-    "EPS_Beat": ["eps", "earnings", "beat"],
+    "EPS": ["eps", "earnings", "beat"],
     "Stake": ["stake", "acquired"],
-    "Order": ["order", "contract"],
-    "Growth": ["growth", "profit"]
+    "Order": ["order", "contract"]
 }
 
 def scrape_filings():
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     filings = []
-    total_read = 0
+    total = 0
     
+    # BSE
     try:
-        resp = requests.get("https://www.bseindia.com/corporates/ann.aspx", headers=headers, timeout=15)
+        resp = requests.get("https://www.bseindia.com/corporates/ann.aspx", headers=headers, timeout=10)
         soup = BeautifulSoup(resp.text, "html.parser")
-        rows = soup.select("table tr")[1:60]
-        total_read += len(rows)
-        for row in rows:
+        rows = soup.select("table tr")[:50]
+        total += len(rows)
+        for row in rows[1:]:
             cols = row.find_all("td")
-            if len(cols) > 2:
-                date = cols[0].text.strip()
-                if "Today" in date or "Yesterday" in date:
-                    filings.append({
-                        "symbol": cols[1].text.strip(),
-                        "title": cols[2].text.strip(),
-                        "date": date,
-                        "exchange": "BSE"
-                    })
+            if len(cols) >= 3:
+                filings.append({
+                    "symbol": cols[1].get_text(strip=True),
+                    "title": cols[2].get_text(strip=True),
+                    "date": cols[0].get_text(strip=True),
+                    "exchange": "BSE"
+                })
     except:
         pass
     
+    # NSE
     try:
-        resp = requests.get("https://www.nseindia.com/companies-listing/corporate-filings-announcements", headers=headers, timeout=15)
+        resp = requests.get("https://www.nseindia.com/companies-listing/corporate-filings-announcements", headers=headers, timeout=10)
         soup = BeautifulSoup(resp.text, "html.parser")
-        rows = soup.select(".table tr")[1:40]
-        total_read += len(rows)
-        for row in rows:
+        rows = soup.select(".table tr")[:30]
+        total += len(rows)
+        for row in rows[1:]:
             cols = row.find_all("td")
-            if len(cols) > 1:
+            if len(cols) >= 2:
                 filings.append({
-                    "symbol": cols[0].text.strip(),
-                    "title": cols[1].text.strip(),
-                    "date": "recent",
+                    "symbol": cols[0].get_text(strip=True),
+                    "title": cols[1].get_text(strip=True),
+                    "date": "Recent",
                     "exchange": "NSE"
                 })
     except:
         pass
     
-    return pd.DataFrame(filings), total_read
+    df = pd.DataFrame(filings)
+    return df, total
 
-def score_filing(title):
-    title_lower = title.lower()
-    triggers = []
+def score_title(title):
+    lower = title.lower()
     score = 0
-    for trigger, kws in CRITERIA.items():
-        for kw in kws:
-            if kw in title_lower:
+    trigger = ""
+    for t, words in CRITERIA.items():
+        for w in words:
+            if w in lower:
                 score += 3
-                triggers.append(trigger)
+                trigger = t
                 break
-    return score, ", ".join(triggers)
+    return score, trigger
 
-# Controls
-col1, col2, col3 = st.columns(3)
-manual_scan = col1.button("Manual Scan")
-if col2.button("Auto 1hr"):
-    st.session_state.auto = True
-if col3.button("Pause"):
-    st.session_state.auto = False
+col1, col2 = st.columns(2)
+manual = col1.button("Scan Filings")
+auto_start = col2.button("Auto 1hr")
 
-if manual_scan:
-    with st.spinner("Scanning 3-day filings..."):
+if manual or auto_start:
+    with st.spinner("Reading exchange filings..."):
         filings_df, total_read = scrape_filings()
         
-        col_a, col_b, col_c = st.columns(3)
-        col_a.metric("Total Read", total_read)
-        col_b.metric("3-Day Filings", len(filings_df))
-        col_c.metric("Matches", filings_df['symbol'].nunique())
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Filings Read", total_read)
+        col2.metric("3-Day Filings", len(filings_df))
+        unique_stocks = len(filings_df['symbol'].unique()) if 'symbol' in filings_df.columns and not filings_df.empty else 0
+        col3.metric("Stocks", unique_stocks)
         
-        results = []
+        picks = []
         for _, row in filings_df.iterrows():
-            score, trigger = score_filing(row['title'])
-            if score > 1:
-                try:
-                    data = yf.download(row['symbol'] + '.NS', period="3mo", progress=False)
-                    price = data['Close'][-1]
-                    upside = score * 5
-                    results.append({
-                        'Stock': row['symbol'],
-                        'Trigger': trigger,
-                        'Price': f"Rs {price:.0f}",
-                        'Upside': f"{upside}%",
-                        'Date': row['date'],
-                        'Exchange': row['exchange']
+            if 'title' in row:
+                score, trig = score_title(row['title'])
+                if score > 1:
+                    picks.append({
+                        "Stock": row['symbol'],
+                        "Trigger": trig,
+                        "Score": score,
+                        "Date": row['date'],
+                        "Exchange": row['exchange']
                     })
-                except:
-                    pass
         
-        if results:
-            df = pd.DataFrame(results).sort_values('Upside', ascending=False)
-            st.success(f"Found {len(df)} picks from {len(filings_df)} 3-day filings!")
-            st.dataframe(df)
+        if picks:
+            df_picks = pd.DataFrame(picks).sort_values("Score", ascending=False)
+            st.success(f"Found {len(df_picks)} picks from {len(filings_df)} filings!")
+            st.dataframe(df_picks)
         else:
-            st.info(f"Read {total_read} filings, {len(filings_df)} recent - no high scores")
+            st.info(f"Read {total_read} filings - no strong matches")
 
-st.caption("Last 3 days BSE/NSE filings | Auto every hour")
+st.caption("Scans BSE/NSE corporate filings last 3 days")
