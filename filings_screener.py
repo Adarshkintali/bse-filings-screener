@@ -162,7 +162,7 @@ st.info("""
 - For live deploy: Use Streamlit Cloud + scheduler.
 
 Share specific strategy tweaks!
-"""
+""")
 st.info("""
 Notes:
 - Powered by BSE API for announcements
